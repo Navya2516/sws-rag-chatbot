@@ -20,7 +20,7 @@ from typing import List, Optional
 import pdfplumber
 import chromadb
 from chromadb.config import Settings
-import google.generativeai as genai
+from openai import OpenAI
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -51,8 +51,12 @@ log.info("Loading embedding model...")
 embedder = SentenceTransformer(EMBEDDING_MODEL)
 log.info("Embedding model loaded.")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-genai.configure(api_key=GEMINI_API_KEY)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
+client = OpenAI(
+    api_key=GROQ_API_KEY,
+    base_url="https://api.groq.com/openai/v1"
+)
 
 # ChromaDB — persistent local vector store
 chroma_client = chromadb.PersistentClient(
@@ -259,21 +263,32 @@ COMPANY DOCUMENT CONTEXT:
 
 def generate_answer(question: str, chunks: List[dict], history: List[dict]) -> str:
     system_prompt = build_system_prompt(chunks)
-    
-    model = genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
-        system_instruction=system_prompt
-    )
-    
-    # Build chat history
-    chat_history = []
+
+    messages = [
+        {
+            "role": "system",
+            "content": system_prompt
+        }
+    ]
+
     for turn in history[-6:]:
-        role = "user" if turn["role"] == "user" else "model"
-        chat_history.append({"role": role, "parts": [turn["content"]]})
-    
-    chat = model.start_chat(history=chat_history)
-    response = chat.send_message(question)
-    return response.text
+        messages.append({
+            "role": turn["role"],
+            "content": turn["content"]
+        })
+
+    messages.append({
+        "role": "user",
+        "content": question
+    })
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=messages,
+        temperature=0.3
+    )
+
+    return response.choices[0].message.content
 
 
 # ─── API Routes ───────────────────────────────────────────────────────────────
@@ -340,8 +355,8 @@ async def upload_documents(files: List[UploadFile] = File(...)):
     """Upload PDF files directly via the API and ingest them."""
     import tempfile, shutil
 
-    if not GEMINI_API_KEY:
-        raise HTTPException(status_code=400, detail="GEMINI_API_KEY not set.")
+    if not GROQ_API_KEY:
+        raise HTTPException(status_code=400, detail="GROQ_API_KEY not set.")
 
     upload_dir = DOCUMENTS_PATH
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -375,8 +390,8 @@ async def chat(request: ChatRequest):
     3. Pass chunks + question to Claude as context
     4. Return answer + source document names
     """
-    if not GEMINI_API_KEY:
-        raise HTTPException(status_code=400, detail="GEMINI_API_KEY not configured. Set it in backend/.env")
+    if not GROQ_API_KEY:
+        raise HTTPException(status_code=400, detail="GROQ_API_KEY not configured. Set it in backend/.env")
 
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
