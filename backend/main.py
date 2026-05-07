@@ -20,7 +20,7 @@ from typing import List, Optional
 import pdfplumber
 import chromadb
 from chromadb.config import Settings
-from anthropic import Anthropic
+import google.generativeai as genai
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -51,7 +51,8 @@ log.info("Loading embedding model...")
 embedder = SentenceTransformer(EMBEDDING_MODEL)
 log.info("Embedding model loaded.")
 
-anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+genai.configure(api_key=GEMINI_API_KEY)
 
 # ChromaDB — persistent local vector store
 chroma_client = chromadb.PersistentClient(
@@ -257,22 +258,22 @@ COMPANY DOCUMENT CONTEXT:
 
 
 def generate_answer(question: str, chunks: List[dict], history: List[dict]) -> str:
-    """Generate an answer using Claude with RAG context."""
     system_prompt = build_system_prompt(chunks)
-
-    # Build message history (last 6 turns for context)
-    messages = []
-    for turn in history[-6:]:
-        messages.append({"role": turn["role"], "content": turn["content"]})
-    messages.append({"role": "user", "content": question})
-
-    response = anthropic_client.messages.create(
-        model=LLM_MODEL,
-        max_tokens=1024,
-        system=system_prompt,
-        messages=messages,
+    
+    model = genai.GenerativeModel(
+        model_name="gemini-2.0-flash",
+        system_instruction=system_prompt
     )
-    return response.content[0].text
+    
+    # Build chat history
+    chat_history = []
+    for turn in history[-6:]:
+        role = "user" if turn["role"] == "user" else "model"
+        chat_history.append({"role": role, "parts": [turn["content"]]})
+    
+    chat = model.start_chat(history=chat_history)
+    response = chat.send_message(question)
+    return response.text
 
 
 # ─── API Routes ───────────────────────────────────────────────────────────────
@@ -339,8 +340,8 @@ async def upload_documents(files: List[UploadFile] = File(...)):
     """Upload PDF files directly via the API and ingest them."""
     import tempfile, shutil
 
-    if not ANTHROPIC_API_KEY:
-        raise HTTPException(status_code=400, detail="ANTHROPIC_API_KEY not set.")
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=400, detail="GEMINI_API_KEY not set.")
 
     upload_dir = DOCUMENTS_PATH
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -374,8 +375,8 @@ async def chat(request: ChatRequest):
     3. Pass chunks + question to Claude as context
     4. Return answer + source document names
     """
-    if not ANTHROPIC_API_KEY:
-        raise HTTPException(status_code=400, detail="ANTHROPIC_API_KEY not configured. Set it in backend/.env")
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=400, detail="GEMINI_API_KEY not configured. Set it in backend/.env")
 
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
